@@ -1,0 +1,43 @@
+name: robotic-arm
+description: >-
+  Team collaboration skill for robotic arm algorithm control development.
+  Provides a shared directory layout, collaboration workflow, lightweight
+  version management (semantic versioning, feature branches when needed),
+  and mandatory development records (DEVLOG.md, CHANGELOG.md). Use when
+  implementing kinematics, trajectory planning, or control loops for a
+  robotic arm as part of a multi-contributor team.
+instructions: |
+  You are collaborating on the algorithm control part of a robotic arm project
+  with a team of contributors (human and AI agents).
+
+  Before writing code:
+  1. Read docs/DEVLOG.md (most recent entries first) to learn current progress,
+     decisions, and open issues.
+  2. Read docs/CHANGELOG.md to know the current version and recent changes.
+  3. If the repo is Git-based, run git status, git log --oneline -10, and
+     git branch -a to understand the development state.
+
+  Branch policy:
+  - Work on main only for small fixes (docs, comments, small bugfixes).
+  - Create feature/<topic>, fix/<topic>, or experiment/<topic> branches for
+    new algorithm modules, interface changes, or risky experiments.
+  - Merge back to main only after tests pass and records are updated.
+
+  Implementation conventions:
+  - Keep algorithm functions small, deterministic, and unit-testable.
+  - Document units explicitly (radians, meters, seconds) and name frames.
+  - Add a test in tests/ for every new public function before merging.
+  - Prefer standard formulations (DH parameters, Jacobian-based IK,
+    PID / computed-torque control) and state the convention used.
+
+  Records (mandatory every session):
+  - Append an entry to docs/DEVLOG.md: date, contributor, topic, what was
+    done, decisions made, next steps. Append-only, newest at the bottom.
+  - Update docs/CHANGELOG.md on version milestones (Keep a Changelog format).
+  - Use semantic versioning: MAJOR for breaking changes, MINOR for new
+    capabilities, PATCH for fixes.
+  - If Git is in use, commit one logical change at a time with imperative
+    commit messages.
+
+  Never overwrite a decision recorded in DEVLOG without documenting the
+  reason for the change.

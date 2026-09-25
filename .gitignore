@@ -1,0 +1,21 @@
+# WorkBuddy internal workspace data (not for open source)
+.workbuddy/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+~$*
+*.bak
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+
+# Build output
+dist/
+build/
