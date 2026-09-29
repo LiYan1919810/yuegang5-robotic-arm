@@ -1,0 +1,17 @@
+# 统一换行符，避免 Windows/Linux 协作时的整文件 diff
+* text=auto eol=lf
+
+# Arduino 源码
+*.ino   text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+
+# 文档
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# 二进制
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.zip   binary

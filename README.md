@@ -53,10 +53,20 @@
 
 ```
 yuegang5_Skill/
-├── README.md             # 本文件：项目介绍与需求
+├── README.md                    # 本文件：项目介绍与需求
+├── 机械臂设计思路.txt            # 设计思路（结构拆分 + 功能实现）
+├── 开发记录.txt                  # 原始开发记录
+├── docs/
+│   ├── DEVLOG.md                # 结构化开发记录（追加式）
+│   ├── CHANGELOG.md             # 版本变更记录
+│   └── 开发总结.md              # 开发阶段总结
+├── 3126000394mearm/
+│   └── 3126000394mearm.ino      # 串口通讯 + 指令控制 + A/B/C 动作组
+├── yaoganmearm/
+│   └── yaoganmearm.ino          # 摇杆控制 + 非阻塞按键读取
 └── skills/
-    └── robotic-arm/      # 团队协作开发 Skill
-        ├── SKILL.md      # 协作流程、分支策略、开发记录与版本管理约定
+    └── robotic-arm/             # 团队协作开发 Skill
+        ├── SKILL.md             # 协作流程、分支策略、开发记录与版本管理约定
         └── agents/
             └── openai.yaml
 ```
