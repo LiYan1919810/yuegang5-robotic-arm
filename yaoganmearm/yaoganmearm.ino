@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-const uint8_t buttonPins[3]={10,11,12};
+const uint8_t buttonPins[4]={10,11,12,13};
 struct ButtonState
 {
   uint8_t pin;
@@ -11,14 +11,14 @@ struct ButtonState
   int  lastChangeTime;
 };
 
-ButtonState buttons[3];
+ButtonState buttons[4];
 
 #define OPENCLAW  120
 #define CLOSECLAW 180      // 原值 10 小于 MINCpos(25)，夹爪会一直堵转
 
 const int MAXMpos = 180, MINMpos = 0;     // Middle
 const int MAXRpos = 180, MINRpos = 45;    // Right
-const int MAXLpos = 120, MINLpos = 35;    // Left
+const int MAXLpos = 120, MINLpos = 20;    // Left
 const int MAXCpos = 180, MINCpos = 120;    // Claw
 const int DEBOUNCE_MS=30;
 
@@ -26,12 +26,26 @@ Servo Middle;
 Servo Left;
 Servo Right;
 Servo Claw;
-
+/*---------舵机控制相关变量1-------------*/
 int Mpos = 90;
 int Lpos = 45;
 int Rpos = 45;
-int Cpos = 90;
-int speed = 30;               // 每 1 度的延时(ms)，越大越慢
+int Cpos = 135;
+int speed = 30;               // 每 1 度的延时(ms)，越大越慢（注：当前未使用，实际节拍由 TURN_INTERVAL 控制）
+int Action_Mode=2;
+const int TURN_INTERVAL=30;   // 舵机每走 1 度之间的最小间隔(ms)
+
+/*---------舵机控制相关变量2-------------*/
+#define ACTION_MAX_QUEUE 16
+struct ServoTarget{int M,R,L,C;};
+ServoTarget actionQueue[ACTION_MAX_QUEUE];
+uint8_t queueHead=0;     //下标
+uint8_t queueCount=0;    //队列中待执行动作数
+uint8_t actionPhase=1;   //当前动作进行到的待机序号
+/*
+1->M 2->R 3->L 4->C
+*/
+unsigned long lastStepTime=0;
 /*------------摇杆相关定义------------------*/
 //摇杆一：X(A0)->Middle     Y(A1)->Left
 //摇杆二：X(A2)->Right      Y(A3)->Claw
@@ -55,8 +69,24 @@ bool joySwStable=HIGH;
 void joystickControl();
 void joystickButtonScan();
 int move(int pin);
+/*------------按键变量--------*/
+#define KEY1_MASK 0x01
+#define KEY2_MASK 0x02
+#define KEY3_MASK 0x04
+#define KEY4_MASK 0x08
+
+bool repeatMode =false;     //循环状态判断
+
+uint8_t updateButton();
+
 /*-------舵机动作函数声明----------------*/
-void turn(char name, int frompos, int topos);
+bool turn(char name,int topos);
+void Action(int toMpos,int toRpos,int toLpos,int toCpos);
+void actionTick();
+void clearActionQueue();
+void Action_A();
+void Action_B();
+void Action_C();
 void setup() {
   // put your setup code here, to run once:
   Claw.attach(6);
@@ -64,7 +94,8 @@ void setup() {
   Left.attach(8);
   Middle.attach(9);
   Serial.begin(9600);
-  for(int i=0;i<3;i++)
+  Action(100,50,90,OPENCLAW);
+  for(int i=0;i<4;i++)
   {
     pinMode(buttonPins[i],INPUT_PULLUP);
 
@@ -78,165 +109,167 @@ void setup() {
   Serial.println("Serial ready");
 }
 //非阻塞状态检测
-bool updateButton(ButtonState &btn)
+uint8_t updateButton()
+{
+  uint8_t pressMask=0;
+
+  for(int i=0;i<4;i++)
   {
-    bool reading =digitalRead(btn.pin);
-    bool pressedEvent=false;
-
-    if(reading!=btn.lastReading)
+    bool reading=digitalRead(buttons[i].pin);
+    //状态检测
+    if(reading!=buttons[i].lastReading)
     {
-      btn.lastChangeTime=millis();
-      btn.lastReading=reading;
+      buttons[i].lastChangeTime=millis();
+      buttons[i].lastReading=reading;
     }
-
-    if(millis()-btn.lastChangeTime>=DEBOUNCE_MS)
+    //消抖
+    if(millis()-buttons[i].lastChangeTime>=DEBOUNCE_MS)
     {
-      if(reading!=btn.stableState)
+      if(reading!=buttons[i].stableState)
       {
-        btn.stableState=reading;
-
-        if(btn.stableState==LOW)
+        buttons[i].stableState=reading;
+        if(buttons[i].stableState==LOW)
         {
-          pressedEvent=true;
+          pressMask|=(1<<i);
+          //这里询问了ai才得出来的
+          //记录第i个按键被按下
         }
       }
     }
-    return pressedEvent;
   }
+return pressMask;
+}
 void loop() 
 {
   joystickControl();
   joystickButtonScan();
+  uint8_t keyEvent=updateButton();
+  //按下按键4，停止循环，并回归到初始状态
+  if(keyEvent&KEY4_MASK)
+  {
+    repeatMode=false;
+    clearActionQueue();             //清空未完成的动作
+    Action(100,50,90,CLOSECLAW);
+  }
+  if(keyEvent&KEY1_MASK)
+  {
+    Action_Mode=(Action_Mode+1)%3;
+    repeatMode=true;
+    clearActionQueue();            //清空动作，立即执行下一个动作组
+  }
+  //循环模式
+  if(repeatMode&&queueCount==0)
+  {
+    switch(Action_Mode)
+    {
+      case 0:Action_A();break;
+      case 1:Action_B();break;
+      case 2:Action_C();break;
+      default:break;
+    }
+  }
+  actionTick();   //每个主循环都推进一次动作，否则动作会走 1 度就卡住
   // put your main code here, to run repeatedly:
 }
 //舵机控制函数
-void turn(char name, int frompos, int topos) {
-  if (frompos == topos) return;
+bool turn(char name,int topos)
+{
+  int *pos=NULL;
+  //获取位置信息
+  switch(name)
+  {
+    case 'M':pos=&Mpos;break;
+    case 'R':pos=&Rpos;break;
+    case 'L':pos=&Lpos;break;
+    case 'C':pos=&Cpos;break;
+    default:return true;    //未知舵机：直接视为完成，防止卡死
+  }
 
-  int step = (frompos < topos) ? 1 : -1;
-  for (int i = frompos; ; i += step) {
-    switch (name) {
-      case 'M': Middle.write(i); break;
-      case 'R': Right.write(i);  break;
-      case 'L': Left.write(i);   break;
-      case 'C': Claw.write(i);   break;
-      default: return;
+  if(*pos==topos) return true;//已到达终点
+  if(millis()-lastStepTime<TURN_INTERVAL) return false;
+    //未到时间先返回
+    //终于想到了我哭死,终于不阻塞了QAQ
+    lastStepTime=millis();
+    *pos+=(*pos<topos)?1:-1;    //确定移动方向
+
+    switch(name)
+    {
+      case 'M':Middle.write(*pos);break;
+      case 'R':Right.write(*pos);break;
+      case 'L':Left.write(*pos);break;
+      case 'C':Claw.write(*pos);break; 
     }
-    if (i == topos) break;
-    delay(speed);
+    return (*pos==topos);
+  
+}
+//动作函数
+void Action(int toMpos,int toRpos,int toLpos,int toCpos)
+{
+  if(queueCount>=ACTION_MAX_QUEUE) return; //防止动作溢出;
+  if(queueCount==0) actionPhase=1;         //新序列开始
+  uint8_t idx=(queueHead+queueCount)%ACTION_MAX_QUEUE;
+  actionQueue[idx].M=toMpos;
+  actionQueue[idx].R=toRpos;
+  actionQueue[idx].L=toLpos;
+  actionQueue[idx].C=toCpos;
+  queueCount++;
+}
+//清空队列函数
+void clearActionQueue()
+{
+  queueHead=0;
+  queueCount=0;
+  actionPhase=1;
+}
+//用于一个节拍推进一步
+void actionTick()
+{
+  if(queueCount==0) return; //没有可执行动作
+
+  ServoTarget &t =actionQueue[queueHead];
+  bool done=false;
+  switch(actionPhase)
+  {
+    case 1:done=turn('M',t.M);break;
+    case 2:done=turn('R',t.R);break;
+    case 3:done=turn('L',t.L);break;
+    case 4:done=turn('C',t.C);break;
+    default: actionPhase=1;return;
+  }
+  //到位后切换到下一个舵机
+  if(done)
+  {
+    actionPhase++;
+    if(actionPhase>4)
+    {
+      actionPhase=1;
+      queueHead=(queueHead+1)%ACTION_MAX_QUEUE;
+      queueCount--;
+    }       
   }
 }
 /*-----动作组函数--------*/
 void Action_A()
 {
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
-  turn('M',Mpos,30);
-  Mpos=30;
-  turn('R',Rpos,110);
-  Rpos=110;
-  turn('L',Lpos,25);
-  Lpos=25;
-  delay(400);
-  turn('C',Cpos,CLOSECLAW);
-  Cpos=CLOSECLAW;
-  turn('M',Mpos,50);
-  Mpos=50;
-  turn('R',Rpos,100);
-  Rpos=100;
-  turn('L',Lpos,30);
-  Lpos=30;
-  delay(400);
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  delay(200);
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
+  Action(100,50,90,OPENCLAW);
+  Action(30,110,25,CLOSECLAW);
+  Action(50,100,30,OPENCLAW);
+  Action(100,50,90,CLOSECLAW);
 }
 void Action_B()
 {
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,110);
-  Rpos=110;
-  turn('L',Lpos,25);
-  Lpos=25;
-  delay(400);
-  turn('C',Cpos,CLOSECLAW);
-  Cpos=CLOSECLAW;
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,120);
-  Rpos=120;
-  turn('L',Lpos,50);
-  Lpos=50;
-  delay(400);
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  delay(200);
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
+  Action(100,50,90,OPENCLAW);
+  Action(100,110,25,CLOSECLAW);
+  Action(100,120,50,OPENCLAW);
+  Action(100,50,90,CLOSECLAW);
 }
 void Action_C()
 {
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
-  turn('M',Mpos,145);
-  Mpos=145;
-  turn('R',Rpos,100);
-  Rpos=100;
-  turn('L',Lpos,20);
-  Lpos=20;
-  delay(400);
-  turn('C',Cpos,CLOSECLAW);
-  Cpos=CLOSECLAW;
-  turn('M',Mpos,120);
-  Mpos=120;
-  turn('R',Rpos,100);
-  Rpos=100;
-  turn('L',Lpos,25);
-  Lpos=25;
-  delay(400);
-  turn('C',Cpos,OPENCLAW);
-  Cpos=OPENCLAW;
-  delay(200);
-  turn('M',Mpos,100);
-  Mpos=100;
-  turn('R',Rpos,50);
-  Rpos=50;
-  turn('L',Lpos,90);
-  Lpos=90;
+  Action(100,50,90,OPENCLAW);
+  Action(135,100,20,CLOSECLAW);
+  Action(120,100,25,OPENCLAW);
+  Action(100,50,90,CLOSECLAW);
 }
-
-
 
 //摇杆动作函数
 int move(int pin)
@@ -257,6 +290,7 @@ int move(int pin)
 //摇杆控制舵机的函数
 void joystickControl()
 {
+  if(queueCount>0) return;   //动作执行期间暂停摇杆，避免与动作争抢同一舵机
   static int lastM=-1,lastR=-1,lastL=-1,lastC=-1;
   //限速
   if(millis()-joyLastRead<JOY_INTERVAL) return;
@@ -278,7 +312,7 @@ void joystickButtonScan()
 {
   int count=0;
   bool reading =digitalRead(J_SW_PIN);
-
+  
   if(reading!=joySwLast)
   {
     joySwChangeTime=millis();
