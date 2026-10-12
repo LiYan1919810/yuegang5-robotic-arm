@@ -62,8 +62,8 @@ yuegang5_Skill/
 │   └── 开发总结.md              # 开发阶段总结
 ├── 3126000394mearm/
 │   └── 3126000394mearm.ino      # 串口通讯 + 指令控制 + A/B/C 动作组
-├── yaoganmearm/
-│   └── yaoganmearm.ino          # 摇杆控制 + 非阻塞按键读取
+├── yaogan/
+│   └── yaogan.ino               # 摇杆控制 + 运动学解算 + 直线插值 + 录制 / 示教
 └── skills/
     └── robotic-arm/             # 团队协作开发 Skill
         ├── SKILL.md             # 协作流程、分支策略、开发记录与版本管理约定
