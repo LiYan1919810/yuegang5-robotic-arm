@@ -13,13 +13,13 @@ struct ButtonState
 };
 ButtonState buttons[4];
 
-#define OPENCLAW  60
-#define CLOSECLAW 130      
+#define OPENCLAW  90
+#define CLOSECLAW 180      
 
 const int MAXMpos = 180, MINMpos = 0;     // Middle
 const int MAXRpos = 180, MINRpos = 20;    // Right
 const int MAXLpos = 130, MINLpos = 10;    // Left
-const int MAXCpos = 130, MINCpos = 60;    // Claw
+const int MAXCpos = 180, MINCpos = 90;    // Claw
 const int DEBOUNCE_MS=30;
 
 Servo Middle;
@@ -30,10 +30,9 @@ Servo Claw;
 int Mpos = 90;
 int Lpos = 45;
 int Rpos = 45;
-int Cpos = 60;
-int speed = 30;               // 每 1 度的延时(ms)，越大越慢（注：当前未使用，实际节拍由 TURN_INTERVAL 控制）
-int Action_Mode=2;
-const int TURN_INTERVAL=15;   // 舵机每走 1 度之间的最小间隔(ms)：越小越快（15=比原来快一倍）
+int Cpos = 90;
+int Action_Mode=2;      //当前动作序号(0=A,1=B,2=C)；初始 2 使首次按按键1 播放 A
+int TURN_INTERVAL=15;   // 舵机每走 1 度之间的最小间隔(ms)
 
 /*---------舵机控制相关变量2-------------*/
 #define ACTION_MAX_QUEUE 16
@@ -90,10 +89,17 @@ static unsigned long lineLastTime = 0;
 static unsigned int  lineIntervalMs = 30;  // 当前直线每步间隔(ms)，moveLineTo 会重置为 LINE_INTERVAL_MS
 #define LINE_INTERVAL_MS   30     // 普通直线每步间隔(ms)（动作组 / V 命令等）
 #define TEACH_LINE_INTERVAL_MS 60 // 示教播放时每步间隔(ms)：越大越慢，便于观察
-/*--------摩擦力/精度误差补偿（自适应 z 修正）--------*/
-#define Z_COMP_MM   1.0f
-#define Z_MIN_MM    1.0f    // 补偿后 z 的下限保护(mm)
-#define Z_MAX_MM   250.0f   // 补偿后 z 的上限保护(mm)
+/*--------示教摩擦力/精度误差补偿（仅用于五点示教）--------*/
+// 现象：抓笔时有摩擦力，且逆解在靠近中心(0,0,0)时 z 偏低、越远离越高。
+// 策略：以第 1 个点为基准。记录第 i(>=2) 点时，比较它与"第 1 个点"离原点的水平距离
+//       r=sqrt(x^2+y^2)：
+//   · 比首点更靠近原点（r 更小）→ 第 i 点 z = 首点 z + TEACH_Z_COMP_MM
+//   · 比首点更远离原点（r 更大）→ 第 i 点 z = 首点 z - TEACH_Z_COMP_MM
+//   · 与首点基本等距（差值在 TEACH_R_DEADBAND 内）→ 与首点同高
+// 第 1 个点不补偿，直接取实测 z。各点独立与首点比较，偏差最多 ±TEACH_Z_COMP_MM，不累积。
+// 调参：TEACH_Z_COMP_MM 为补偿量(mm)，设为 0 可关闭；TEACH_R_DEADBAND 为等距死区(mm)。
+#define TEACH_Z_COMP_MM   1      // 示教点 z 相对首点的补偿量(mm)
+#define TEACH_R_DEADBAND  0.3f   // 径向距离"视为与首点等距"的死区(mm)
 //
 /*--------录制功能相关--------*/
 const int MAX_FRAMES=50;          //最大录制帧数（50帧×10mm≈50cm 行程）
@@ -107,6 +113,8 @@ int reproduceIndex=0;               //当前回放到第几帧
 bool recordMode=false;
 bool reproduceMode=false;           //在判断时需注意，只有当记录模式为fasle且再现模式为true的时候才会复现
 bool paused=false;                  //播放任务中是否被暂停
+bool linePaused=false;              //画图/直线任务是否被暂停（按键一 / 串口5 控制）
+unsigned long linePauseStart=0;     //本次暂停的开始时刻，恢复时用于补偿计时基准
 unsigned long frameLastRead=0;
 unsigned long reproduceLastRead=0;
 //上一次的爪子位置以及爪子角度
@@ -138,8 +146,10 @@ void joystickControl();
 void joystickButtonScan();
 int move(int pin);
 /*------------按键变量--------*/
-bool repeatMode=false;     //循环状态判断
 void updateButton();
+void onButton1();           //按键一 / 串口4 的统一处理
+bool drawTaskBusy();        //画图/直线任务是否进行中
+void toggleLinePause();     //画图/直线任务 暂停/继续
 /*--------录制播放函数声明--------*/
 void Frame();
 void Reproduce();
@@ -245,9 +255,10 @@ void loop()
   //按下按键4，停止循环，并回归到初始状态
   if(buttons[3].pressed)
   {
-    repeatMode=false;
     clearActionQueue();             //清空未完成的动作
     lineActive=false;               //停止在途的直线插值
+    linePaused=false;               //清除画图/直线暂停状态
+    Line1=0;                        //取消在途的直线串联（V / 串口3 的后续段）
     teachPlayIndex=-1;              //停止示教播放
     teachSettleStart=0;             //清除示教稳定等待
     teachSegArmed=false;
@@ -257,11 +268,10 @@ void loop()
     Action(100,50,90,CLOSECLAW);
     Serial.println("[按键4] 初始化完成，已回归初始状态");
   }
+  //按键1 / 串口4：画图（直线）任务进行中 = 暂停/继续；空闲时 = 依次播放动作 A -> B -> C
   if(buttons[0].pressed)
   {
-    Action_Mode=(Action_Mode+1)%3;
-    repeatMode=true;
-    clearActionQueue();            //清空动作，立即执行下一个动作组
+    onButton1();
   }
   //按键2：普通模式=录制/暂停；示教模式=开始/结束示教、播放中=暂停/继续
   if(buttons[1].pressed)
@@ -383,17 +393,6 @@ void loop()
 
   
   
-  //循环模式
-  if(repeatMode&&queueCount==0)
-  {
-    switch(Action_Mode)
-    {
-      case 0:Action_A();break;
-      case 1:Action_B();break;
-      case 2:Action_C();break;
-      default:break;
-    }
-  }
   if(recordMode && !teachMode)   //示教模式只负责打点，不跑帧采样
   {
     Frame();
@@ -482,7 +481,7 @@ void actionTick()
       actionPhase=1;
       queueHead=(queueHead+1)%ACTION_MAX_QUEUE;
       queueCount--;
-    }       
+    }
   }
 }
 /*-----动作组函数--------*/
@@ -490,32 +489,25 @@ void Action_A()
 {
   Action(100,50,90,OPENCLAW);
   Action(50,50,45,OPENCLAW);
-  Action(50,100,25,CLOSECLAW);
-  Action(50,50,45,CLOSECLAW);
-  Action(80,100,30,OPENCLAW);
-  Action(80,50,90,CLOSECLAW);
-  Action(100,50,90,CLOSECLAW);
+  Action(50,110,25,CLOSECLAW);
+  Line1=5;
+  nowtime=0;
 }
 void Action_B()
 {
   Action(100,50,90,OPENCLAW);
-  Action(100,50,20,OPENCLAW);
-  Action(100,100,20,CLOSECLAW);
-  Action(100,100,50,CLOSECLAW);
-  Action(100,50,90,CLOSECLAW);
-  Action(100,50,50,CLOSECLAW);
-  Action(100,110,50,OPENCLAW);
-  Action(100,50,90,CLOSECLAW);
+  Action(100,60,90,CLOSECLAW);
+  Line1=6;
+  nowtime=0;
+
 }
 void Action_C()
 {
   Action(100,50,90,OPENCLAW);
   Action(100,50,25,OPENCLAW);
-  Action(135,110,20,CLOSECLAW);
-  Action(135,50,90,CLOSECLAW);
-  Action(120,100,25,OPENCLAW);
-  Action(120,50,25,CLOSECLAW);
-  Action(100,50,90,CLOSECLAW);
+  Action(135,120,20,CLOSECLAW);
+  Line1=7;
+  nowtime=0;
 }
 void Action_Line()
 {
@@ -597,8 +589,7 @@ void joystickButtonScan()
     }
   }
 }
-//每 REC_SAMPLE_MS（30ms） 采样一次，正解当前爪尖与"上一条记录点"比距离，
-//位移>REC_DIST_MM (10mm)或 爪子角度变化>REC_CLAW_DEG (40)才记一帧（爪尖没动不浪费帧，爪子开合不丢）
+
 void Frame()
 {
   if(millis()-frameLastRead<=REC_SAMPLE_MS) return;
@@ -685,12 +676,30 @@ void teachRecordPoint()
   float x,y,z;
   solveFK(x,y,z);                 //正解当前爪尖坐标（基于 Mpos/Rpos/Lpos）
 
-  //z 锁定为第一个点的 z：所有示教点保持同一水平面，便于用笔在纸面划线
-  int16_t zUse=(teachPointCount==0) ? (int16_t)lround(z)
-                                    : teachPoints[0][2];
+  int16_t nx=(int16_t)lround(x);  //本点 x/y 按毫米取整（与存储一致，便于 r 比较口径统一）
+  int16_t ny=(int16_t)lround(y);
 
-  teachPoints[teachPointCount][0]=lround(x);   //按毫米取整后存入（int16_t）
-  teachPoints[teachPointCount][1]=lround(y);
+
+  int16_t zUse;
+  int16_t zDelta=0;
+  if(teachPointCount==0)
+  {
+    zUse=(int16_t)lround(z);      //基准点：实测高度，不补偿
+  }
+  else
+  {
+    int16_t p0x=teachPoints[0][0];
+    int16_t p0y=teachPoints[0][1];
+    float rFirst=sqrt((float)p0x*(float)p0x+(float)p0y*(float)p0y);  //首点径向距离
+    float rNew  =sqrt((float)nx*(float)nx+(float)ny*(float)ny);      //本点径向距离
+    zUse=teachPoints[0][2];       //以首点 z 为基准
+    if(rNew<rFirst-TEACH_R_DEADBAND)      { zDelta=+TEACH_Z_COMP_MM; }  //比首点更近：抬高
+    else if(rNew>rFirst+TEACH_R_DEADBAND) { zDelta=-TEACH_Z_COMP_MM; }  //比首点更远：压低
+    zUse+=zDelta;
+  }
+
+  teachPoints[teachPointCount][0]=nx;   //按毫米取整后存入（int16_t）
+  teachPoints[teachPointCount][1]=ny;
   teachPoints[teachPointCount][2]=zUse;
 
   Serial.print(F("[示教] 记录第 "));
@@ -699,7 +708,15 @@ void teachRecordPoint()
   Serial.print((int)teachPoints[teachPointCount][0]); Serial.print(F(","));
   Serial.print((int)teachPoints[teachPointCount][1]); Serial.print(F(","));
   Serial.print((int)zUse);
-  Serial.println(F(")  爪子=闭合(CLOSE)"));
+  Serial.print(F(")"));
+  if(zDelta!=0)
+  {
+    Serial.print(F("  [z补偿 "));
+    Serial.print(zDelta>0?F("+"):F("-"));
+    Serial.print((int)(zDelta>0?zDelta:-zDelta));
+    Serial.print(F("]"));
+  }
+  Serial.println(F("  爪子=闭合(CLOSE)"));
 
   teachPointCount++;
 }
@@ -727,7 +744,7 @@ void teachTick()
   if(teachPlayIndex<0 && teachPlayIndex!=-2) return;   //未在播放（-1=未播放）
   if(paused) return;                                    //暂停时不启动下一段
 
-  //播放前置阶段（-2）：先等回初始位的动作队列走完，再非阻塞等待 TEACH_HOME_WAIT_MS，然后开始走向第1点
+  
   if(teachPlayIndex==-2)
   {
     if(lineActive) return;                 //回初始位期间若混入直线，先等它结束
@@ -769,10 +786,11 @@ void teachTick()
 
   Serial.print(F("[示教] 走向第 "));
   Serial.print(i+1);
-  Serial.println(F(" 点"));
-  //所有点与第1个点同高：z 统一取 teachPoints[0][2]
-  moveLineTo(teachPoints[i][0],teachPoints[i][1],teachPoints[0][2]);
-  lineIntervalMs=TEACH_LINE_INTERVAL_MS;   //示教播放放慢：每步间隔更大（moveLineTo 刚重置过，这里再覆盖）
+  Serial.print(F(" 点  z="));
+  Serial.println((int)teachPoints[i][2]);
+  
+  moveLineTo(teachPoints[i][0],teachPoints[i][1],teachPoints[i][2]);
+  lineIntervalMs=TEACH_LINE_INTERVAL_MS;   //示教播放放慢：每步间隔更大
   teachPlayIndex++;
   teachSegArmed=true;               //标记本段已启动：走完后需先等待舵机稳定，再走下一段
 }
@@ -791,34 +809,24 @@ D=sqrt(R*R+zArm*zArm)
 //通过计算得出关节角
 bool solveIK(float x, float y, float z, float &baseDeg, float &shoulderDeg, float &elbowDeg)
 {
-  float zArm=z-HEIGHT;   // 方程中的 z 是相对肩膀的高度，串口传入的是离地高度
-  //底座轴到爪尖的水平距离
+  float zArm=z-HEIGHT;   
   float r=sqrt(x*x+y*y);
-  //底座回转角：从 +y 轴量起，所以是 atan2(x,y)
   baseDeg=atan2(x,y)*180.0f/PI;
-  //腕关节水平距离：机械爪恒水平，沿径向直接减去爪长
   float R=r-CLAW_LEN;
-  if(R<0.0f) return false;   // 目标太近，腕关节无法退到该半径
-  //肩关节到腕关节的直线距离
+  if(R<0.0f) return false;   
   float D=sqrt(R*R+zArm*zArm);
-  //可达性检查
   if(D>ARM_L1+ARM_L2+0.01f) return false;
   if(D<1.0f) return false;
-  //D与水平的夹角
   float beta=atan2(zArm,R);
-  //L1与D 的夹角（余弦定理）
   float cosAlpha=(ARM_L1*ARM_L1+D*D-ARM_L2*ARM_L2)/(2.0f*ARM_L1*D);
   if(cosAlpha>1.0f) cosAlpha=1.0f;
   if(cosAlpha<-1.0f) cosAlpha=-1.0f;
   float alpha=acos(cosAlpha);
-  //大臂角（肘在上分支）
   float theta1=alpha+beta;
-  //小臂角θ2=θ1+肘部内角（余弦定理）
   float cosGamma=(ARM_L1*ARM_L1+ARM_L2*ARM_L2-D*D)/(2.0f*ARM_L1*ARM_L2);
   if(cosGamma>1.0f) cosGamma=1.0f;
   if(cosGamma<-1.0f) cosGamma=-1.0f;
   float theta2=theta1+acos(cosGamma);
-  //大臂小臂角度
   shoulderDeg=theta1*180.0f/PI;
   elbowDeg=theta2*180.0f/PI;
 
@@ -869,6 +877,14 @@ void parseAndControl(char *cmd) {
     case 'O':
     Action(Mpos,Rpos,Lpos,OPENCLAW);  
     return;
+    case 'H':
+    TURN_INTERVAL+=5;
+    Serial.print("Speed: "); Serial.println(TURN_INTERVAL);
+    return;
+    case 'L':
+    TURN_INTERVAL-=5;
+    Serial.print("Speed: "); Serial.println(TURN_INTERVAL);
+    return;
     case 'A':
       Action_A();
       return;
@@ -887,6 +903,14 @@ void parseAndControl(char *cmd) {
       return;
     case 'V':
       Action_V();
+      return;
+    case '4':
+      // 等同于按下按键一：画图/直线进行中 = 暂停/继续；空闲 = 播放下一个动作 A->B->C
+      onButton1();
+      return;
+    case '5':
+      // 画图/直线任务的暂停/继续（再输入一次 5 即继续播放）
+      toggleLinePause();
       return;
     case '7':
       //切回普通录制模式（原有的帧录制/帧播放）
@@ -1043,25 +1067,14 @@ void moveLineTo(float x,float y,float z)
 {
   lineIntervalMs=LINE_INTERVAL_MS;   //默认速度（示教播放会在调用后覆盖为更慢的值）
   //停止其他任务
-  repeatMode=false;
   recordMode=false;
   reproduceMode=false;
   paused=false;
+  linePaused=false;                  //新画图任务开始，清除上一次的暂停状态
   clearActionQueue();
 
-  //起点坐标先正解一次：既用于打印，也用于本次的摩擦力/误差补偿比较
+  //起点坐标用于打印（正解一次）
   solveFK(lineStart[0],lineStart[1],lineStart[2]);
-
-  //=== 摩擦力/精度误差补偿：按离中心距离变化自适应修正目标 z ===
-  // 由近到远：z -= Z_COMP_MM（现场表现为"越远越高"，故压低）；由远到近：z += Z_COMP_MM
-  float zComp=0.0f;
-  float rStart=sqrt(lineStart[0]*lineStart[0]+lineStart[1]*lineStart[1]); //当前点径向距离
-  float rTarg =sqrt(x*x+y*y);                                            //目标点径向距离
-  if(rTarg>rStart+0.5f)       zComp=-Z_COMP_MM;   //近 -> 远：高度减 1
-  else if(rTarg<rStart-0.5f)  zComp= Z_COMP_MM;   //远 -> 近：高度加 1
-  z+=zComp;
-  if(z<Z_MIN_MM) z=Z_MIN_MM;
-  if(z>Z_MAX_MM) z=Z_MAX_MM;
 
   //终点逆解（含关节角行程检查），不可达则直接报错取消
   int tm,tr,tl; char tLimit;
@@ -1076,14 +1089,14 @@ void moveLineTo(float x,float y,float z)
     return;
   }
 
-  //起点舵机值：直接取当前 Mpos/Rpos/Lpos（不再用 solveFK 反推坐标）
+  //起点舵机值
   lineServoStart[0]=Mpos;
   lineServoStart[1]=Rpos;
   lineServoStart[2]=Lpos;
 
   lineTarget[0]=x;
   lineTarget[1]=y;
-  lineTarget[2]=z;   //注意：这里的 z 已是补偿后的实际目标高度
+  lineTarget[2]=z;  
 
   float dx=lineTarget[0]-lineStart[0];
   float dy=lineTarget[1]-lineStart[1];
@@ -1125,24 +1138,13 @@ void moveLineTo(float x,float y,float z)
   Serial.print(z, 0); Serial.print(")  距离=");
   Serial.print(dist, 0);
   Serial.print("mm  步数=");
-  Serial.print(lineServoSteps);
-  if(zComp!=0.0f)
-  {
-    Serial.print("  [补偿 z");
-    Serial.print(zComp>0?'+':'-');
-    Serial.print(fabs(zComp),0);
-    Serial.print(": r ");
-    Serial.print(rStart,0);
-    Serial.print("->");
-    Serial.print(rTarg,0);
-    Serial.print("]");
-  }
-  Serial.println();
+  Serial.println(lineServoSteps);
 }
 //每 15ms 推进一次：误差累积法——每个舵机累加每步增量，够 ±1 度才转一度，使转动平滑
 void moveLineTick()
 {
   if(!lineActive) return;
+  if(linePaused) return;                    //画图/直线被暂停：冻结当前段，舵机停在原处
   if(paused && teachPlayIndex>=0) return;   //示教播放暂停时冻结当前段（不影响其他直线）
 
   //限速
@@ -1176,6 +1178,7 @@ void moveLineTick()
 void Action_Linenext()
 {
   if(Line1==0) return;
+  if(linePaused) return;   //被暂停：串联段的推进与等待计时一并冻结（nowtime 由 toggleLinePause 恢复时补偿）
   if(Line1==1)
   {
     if(millis()-nowtime<3000 || lineActive) return;
@@ -1196,7 +1199,7 @@ void Action_Linenext()
   {
     if(millis()-nowtime<2000 || lineActive) return;
     nowtime=millis();
-    moveLineTo(90,0,51);
+    moveLineTo(90,0,50);
     Line1=4;
     return;
   }
@@ -1207,5 +1210,89 @@ void Action_Linenext()
     moveLineTo(150,40,49);
     Line1=0;
     return;
+  }
+  if(Line1==5)
+  {
+    if(queueCount>0) return;
+    if(nowtime==0) nowtime=millis();
+    if(millis()-nowtime<1000) return;
+    Action(50,50,45,CLOSECLAW);
+    Action(80,100,30,OPENCLAW);
+    Action(80,50,90,CLOSECLAW);
+    Action(100,50,90,CLOSECLAW);
+    Line1=0;
+    return;
+  }
+  if(Line1==6)
+  {
+    if(queueCount>0) return;
+    if(nowtime==0) nowtime=millis();
+    if(millis()-nowtime<1000) return;
+    Action(100,90,100,OPENCLAW);
+    Action(100,50,90,CLOSECLAW);
+  Line1=0;
+  return;
+  }
+  if(Line1==7)
+  {
+    if(queueCount>0) return;
+    if(nowtime==0) nowtime=millis();
+    if(millis()-nowtime<1000) return;
+Action(135,50,90,CLOSECLAW);
+  Action(120,100,25,OPENCLAW);
+  Action(120,50,25,CLOSECLAW);
+  Action(100,50,90,CLOSECLAW);
+  Line1=0;
+  return;
+}
+  }
+  
+bool drawTaskBusy()
+{
+  return lineActive || (Line1>=1 && Line1<=4);
+}
+
+//暂停/继续切换：冻结整个画图/直线任务（直线推进与串联计时都停下），
+//再执行一次即从原处继续，不会重新开始整段轨迹
+void toggleLinePause()
+{
+  if(!linePaused)
+  {
+    if(!drawTaskBusy())
+    {
+      Serial.println(F("[暂停] 当前没有正在进行的画图/直线任务"));
+      return;
+    }
+    linePaused=true;
+    linePauseStart=millis();
+    Serial.println(F("[暂停] 已暂停，再按一次按键一 / 输入5 继续"));
+  }
+  else
+  {
+    unsigned long d=millis()-linePauseStart;  //本次暂停持续了多久
+    linePaused=false;
+    lineLastTime=millis();                    //重置步进计时，恢复后不会立即推进一大步
+    if(nowtime!=0) nowtime+=d;                //串联等待计时基准后移，恢复后不会立即跳段
+    Serial.println(F("[暂停] 已继续播放"));
+  }
+}
+
+//按键一 / 串口4 的统一处理
+void onButton1()
+{
+  //画图/直线任务进行中（或已处于暂停）-> 暂停/继续
+  if(linePaused || drawTaskBusy())
+  {
+    toggleLinePause();
+    return;
+  }
+  //空闲 -> 依次播放动作 A -> B -> C，每按一次只播放一次
+  Action_Mode=(Action_Mode+1)%3;
+  clearActionQueue();            //清空未完成的动作，立即播放本次动作
+  switch(Action_Mode)
+  {
+    case 0:Action_A();Serial.println(F("[按键1/串口4] 播放动作 A"));break;
+    case 1:Action_B();Serial.println(F("[按键1/串口4] 播放动作 B"));break;
+    case 2:Action_C();Serial.println(F("[按键1/串口4] 播放动作 C"));break;
   }
 }
